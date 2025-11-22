@@ -145,3 +145,16 @@ class TaskHistoryResponse(TaskHistoryBase):
     
     class Config:
         from_attributes = True
+
+class MLTaskResponse(TaskResponse):
+    ml_priority_score: float = None
+    recommended_schedule: str = None
+
+class MLFeedbackBase(BaseModel):
+    feedback_type: str
+    was_useful: bool
+    actual_priority: Optional[str] = None
+    actual_completion_time: Optional[int] = None
+
+class MLFeedbackCreate(MLFeedbackBase):
+    task_id: UUID

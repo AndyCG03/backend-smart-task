@@ -157,3 +157,35 @@ class AIFeedback(Base):
     
     feedback_date = Column(DateTime, default=func.current_timestamp())
     used_for_training = Column(Boolean, default=False)
+
+
+# Nuevo para IA
+class TaskMLData(Base):
+    __tablename__ = "task_ml_data"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    task_id = Column(UUID(as_uuid=True), ForeignKey('tasks.id', ondelete='CASCADE'), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    
+    # Campos específicos para el modelo ML
+    ml_priority_score = Column(DECIMAL(5,4))  # Puntaje del modelo
+    predicted_completion_time = Column(Integer)  # Tiempo estimado en minutos
+    recommended_schedule = Column(String(50))  # Horario recomendado
+    features = Column(JSONB)  # Características extraídas para el ML
+    
+    created_at = Column(DateTime, default=func.current_timestamp())
+    updated_at = Column(DateTime, default=func.current_timestamp(), onupdate=func.current_timestamp())
+
+class MLFeedback(Base):
+    __tablename__ = "ml_feedback"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    task_id = Column(UUID(as_uuid=True), ForeignKey('tasks.id', ondelete='CASCADE'), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    
+    feedback_type = Column(String(50))  # 'priority', 'schedule', 'completion'
+    was_useful = Column(Boolean)
+    actual_priority = Column(String(20))  # Prioridad real que tuvo el usuario
+    actual_completion_time = Column(Integer)  # Tiempo real que tomó
+    
+    created_at = Column(DateTime, default=func.current_timestamp())

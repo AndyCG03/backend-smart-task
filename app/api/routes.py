@@ -8,6 +8,7 @@ from app.api.endpoints.recommendations import router as recommendations_router
 from app.api.endpoints.energy_logs import router as energy_logs_router
 from app.api.endpoints.task_history import router as task_history_router
 from app.api.endpoints.auth import router as auth_router 
+from app.api.endpoints.ml_tasks import router as ml_tasks_router
 
 api_router = APIRouter()
 
@@ -18,3 +19,6 @@ api_router.include_router(categories_router, prefix="/categories", tags=["catego
 api_router.include_router(recommendations_router, prefix="/recommendations", tags=["recommendations"])
 api_router.include_router(energy_logs_router, prefix="/energy-logs", tags=["energy-logs"])
 api_router.include_router(task_history_router, prefix="/task-history", tags=["task-history"])
+
+
+api_router.include_router(ml_tasks_router, prefix="/ml-tasks", tags=["machine-learning"])
