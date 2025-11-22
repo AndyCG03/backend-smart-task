@@ -3,7 +3,24 @@ from typing import Optional, Dict, Any
 from datetime import datetime, date
 from uuid import UUID
 
-# User schemas (ya existentes)
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    user_id: Optional[str] = None
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+    energy_level: Optional[str] = 'medium'
+    preferences: Optional[Dict[str, Any]] = None
+
 class UserBase(BaseModel):
     email: EmailStr
     name: str
@@ -11,7 +28,15 @@ class UserBase(BaseModel):
     energy_level: Optional[str] = 'medium'
 
 class UserCreate(UserBase):
-    password: str  # Contraseña en texto plano solo para creación
+    password: str
+    
+    @validator('password')
+    def validate_password_length(cls, v):
+        if len(v) < 8:
+            raise ValueError('Password must be at least 8 characters long')
+        if len(v) > 72:
+            raise ValueError('Password cannot exceed 72 characters')
+        return v
 
 class UserResponse(UserBase):
     id: UUID
@@ -23,7 +48,6 @@ class UserResponse(UserBase):
         from_attributes = True
 
 
-# Task schemas (ya existentes)
 class TaskBase(BaseModel):
     title: str
     description: Optional[str] = None
@@ -39,7 +63,7 @@ class TaskCreate(TaskBase):
 
 class TaskResponse(TaskBase):
     id: UUID
-    user_id: UUID
+    user_id: UUID  
     priority_score: Optional[int] = None
     priority_level: Optional[str] = None
     completion_probability: Optional[float] = None
@@ -52,7 +76,7 @@ class TaskResponse(TaskBase):
     class Config:
         from_attributes = True
 
-# Category schemas (ya existentes)
+
 class CategoryBase(BaseModel):
     name: str
     color: Optional[str] = '#007bff'
@@ -69,7 +93,7 @@ class CategoryResponse(CategoryBase):
     class Config:
         from_attributes = True
 
-# Recommendation schemas (ya existentes)
+
 class DailyRecommendationBase(BaseModel):
     task_id: UUID
     recommendation_reason: str
@@ -89,7 +113,7 @@ class DailyRecommendationResponse(DailyRecommendationBase):
     class Config:
         from_attributes = True
 
-# Energy Log schemas (nuevos)
+
 class EnergyLogBase(BaseModel):
     energy_level: str
     notes: Optional[str] = None
@@ -106,7 +130,7 @@ class EnergyLogResponse(EnergyLogBase):
     class Config:
         from_attributes = True
 
-# Task History schemas (nuevos)
+
 class TaskHistoryBase(BaseModel):
     change_type: str
     old_values: Optional[Dict[str, Any]] = None

@@ -7,22 +7,23 @@ from datetime import date
 from app.database import get_db
 from app.models.database_models import DailyRecommendation, Task
 from app.models.pydantic_models import DailyRecommendationCreate, DailyRecommendationResponse
+from app.security.auth import get_current_active_user
 
 router = APIRouter()
 
 @router.get("/", response_model=List[DailyRecommendationResponse])
 def get_recommendations(
-    user_id: UUID,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     status: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
 ):
-    """Obtener recomendaciones diarias de un usuario"""
+    """Obtener recomendaciones diarias del usuario actual"""
     query = db.query(DailyRecommendation).filter(
-        DailyRecommendation.user_id == user_id
+        DailyRecommendation.user_id == current_user.id
     )
     
     if start_date:
@@ -36,10 +37,15 @@ def get_recommendations(
     return recommendations
 
 @router.get("/{recommendation_id}", response_model=DailyRecommendationResponse)
-def get_recommendation(recommendation_id: UUID, db: Session = Depends(get_db)):
+def get_recommendation(
+    recommendation_id: UUID, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
     """Obtener una recomendación específica por ID"""
     recommendation = db.query(DailyRecommendation).filter(
-        DailyRecommendation.id == recommendation_id
+        DailyRecommendation.id == recommendation_id,
+        DailyRecommendation.user_id == current_user.id
     ).first()
     
     if not recommendation:
@@ -52,13 +58,12 @@ def get_recommendation(recommendation_id: UUID, db: Session = Depends(get_db)):
 @router.post("/", response_model=DailyRecommendationResponse)
 def create_recommendation(
     recommendation: DailyRecommendationCreate,
-    user_id: UUID,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
 ):
     """Crear una nueva recomendación diaria"""
-    # Verificar si ya existe una recomendación para esta fecha y usuario
     existing_recommendation = db.query(DailyRecommendation).filter(
-        DailyRecommendation.user_id == user_id,
+        DailyRecommendation.user_id == current_user.id,
         DailyRecommendation.recommendation_date == recommendation.recommendation_date
     ).first()
     
@@ -68,21 +73,20 @@ def create_recommendation(
             detail="Recommendation already exists for this date"
         )
     
-    # Verificar que la tarea existe y pertenece al usuario
     task = db.query(Task).filter(
         Task.id == recommendation.task_id,
-        Task.user_id == user_id
+        Task.user_id == current_user.id
     ).first()
     
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Task not found or doesn't belong to user"
+            detail="Task not found"
         )
     
     db_recommendation = DailyRecommendation(
         **recommendation.dict(),
-        user_id=user_id
+        user_id=current_user.id
     )
     
     db.add(db_recommendation)
@@ -94,11 +98,13 @@ def create_recommendation(
 def update_recommendation(
     recommendation_id: UUID,
     recommendation_update: DailyRecommendationCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
 ):
     """Actualizar una recomendación existente"""
     db_recommendation = db.query(DailyRecommendation).filter(
-        DailyRecommendation.id == recommendation_id
+        DailyRecommendation.id == recommendation_id,
+        DailyRecommendation.user_id == current_user.id
     ).first()
     
     if not db_recommendation:
@@ -118,7 +124,8 @@ def update_recommendation(
 def update_recommendation_status(
     recommendation_id: UUID,
     status: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
 ):
     """Actualizar el estado de una recomendación"""
     valid_statuses = ['pending', 'accepted', 'rejected', 'postponed']
@@ -129,7 +136,8 @@ def update_recommendation_status(
         )
     
     db_recommendation = db.query(DailyRecommendation).filter(
-        DailyRecommendation.id == recommendation_id
+        DailyRecommendation.id == recommendation_id,
+        DailyRecommendation.user_id == current_user.id
     ).first()
     
     if not db_recommendation:
@@ -144,10 +152,15 @@ def update_recommendation_status(
     return {"message": "Recommendation status updated successfully"}
 
 @router.delete("/{recommendation_id}")
-def delete_recommendation(recommendation_id: UUID, db: Session = Depends(get_db)):
+def delete_recommendation(
+    recommendation_id: UUID, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
     """Eliminar una recomendación"""
     db_recommendation = db.query(DailyRecommendation).filter(
-        DailyRecommendation.id == recommendation_id
+        DailyRecommendation.id == recommendation_id,
+        DailyRecommendation.user_id == current_user.id
     ).first()
     
     if not db_recommendation:

@@ -21,6 +21,7 @@ class User(Base):
     updated_at = Column(DateTime, default=func.current_timestamp(), onupdate=func.current_timestamp())
     last_login = Column(DateTime)
     is_active = Column(Boolean, default=True)
+    is_admin = Column(Boolean, default=False)  # ← NUEVO CAMPO
     
     __table_args__ = (
         CheckConstraint("energy_level IN ('low', 'medium', 'high')", name="ck_user_energy_level"),

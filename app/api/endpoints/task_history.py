@@ -6,6 +6,7 @@ from uuid import UUID
 from app.database import get_db
 from app.models.database_models import TaskHistory, Task
 from app.models.pydantic_models import TaskHistoryResponse
+from app.security.auth import get_current_active_user
 
 router = APIRouter()
 
@@ -14,11 +15,14 @@ def get_task_history(
     task_id: UUID,
     skip: int = 0,
     limit: int = 100,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
 ):
     """Obtener historial de cambios de una tarea específica"""
-    # Verificar que la tarea existe
-    task = db.query(Task).filter(Task.id == task_id).first()
+    task = db.query(Task).filter(
+        Task.id == task_id,
+        Task.user_id == current_user.id
+    ).first()
     if not task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -31,24 +35,31 @@ def get_task_history(
     
     return history
 
-@router.get("/user/{user_id}", response_model=List[TaskHistoryResponse])
+@router.get("/user/", response_model=List[TaskHistoryResponse])
 def get_user_task_history(
-    user_id: UUID,
     skip: int = 0,
     limit: int = 100,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
 ):
-    """Obtener historial de cambios de todas las tareas de un usuario"""
+    """Obtener historial de cambios de todas las tareas del usuario actual"""
     history = db.query(TaskHistory).filter(
-        TaskHistory.user_id == user_id
+        TaskHistory.user_id == current_user.id
     ).order_by(TaskHistory.created_at.desc()).offset(skip).limit(limit).all()
     
     return history
 
 @router.get("/{history_id}", response_model=TaskHistoryResponse)
-def get_history_entry(history_id: UUID, db: Session = Depends(get_db)):
+def get_history_entry(
+    history_id: UUID, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_active_user)
+):
     """Obtener una entrada específica del historial"""
-    history_entry = db.query(TaskHistory).filter(TaskHistory.id == history_id).first()
+    history_entry = db.query(TaskHistory).filter(
+        TaskHistory.id == history_id,
+        TaskHistory.user_id == current_user.id
+    ).first()
     if not history_entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

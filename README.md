@@ -54,6 +54,14 @@ pip install -r requirements.txt
 CREATE DATABASE smart_task;
 ```
 
+**Crear Usuario Administrador**
+
+El sistema incluye un script para crear usuarios administradores:
+
+```bash
+# Ejecutar el script de creación de administrador
+python scripts/admin_init.py
+
 
 ### 5. Configurar variables de entorno
 
@@ -192,7 +200,7 @@ curl -X POST "http://localhost:8000/api/v1/tasks/" \
 
 | Variable | Descripción | Valor por Defecto |
 |----------|-------------|-------------------|
-| DATABASE_URL | URL de conexión a PostgreSQL | postgresql://postgres:password@localhost:5432/task_priority_db |
+| DATABASE_URL | URL de conexión a PostgreSQL | postgresql://postgres:password@localhost:5432/smart_task |
 | ALLOWED_ORIGINS | Orígenes permitidos para CORS | http://localhost:3000,http://127.0.0.1:3000 |
 | DEBUG | Modo debug | true |
 
@@ -222,7 +230,7 @@ pip install psycopg2-binary
 Verificar que:
 1. PostgreSQL esté ejecutándose
 2. Las credenciales en `.env` sean correctas
-3. La base de datos `task_priority_db` exista
+3. La base de datos `smart_task` exista
 
 ### Limpiar caché de Python
 
