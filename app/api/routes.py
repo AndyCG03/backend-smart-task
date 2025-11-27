@@ -17,8 +17,8 @@ api_router.include_router(users_router, prefix="/users", tags=["users"])
 api_router.include_router(tasks_router, prefix="/tasks", tags=["tasks"])
 api_router.include_router(categories_router, prefix="/categories", tags=["categories"])
 api_router.include_router(recommendations_router, prefix="/recommendations", tags=["recommendations"])
-api_router.include_router(energy_logs_router, prefix="/energy-logs", tags=["energy-logs"])
-api_router.include_router(task_history_router, prefix="/task-history", tags=["task-history"])
+api_router.include_router(energy_logs_router, prefix="/energy_logs", tags=["energy_logs"])
+api_router.include_router(task_history_router, prefix="/task_history", tags=["task_history"])
 
 
-api_router.include_router(ml_tasks_router, prefix="/ml-tasks", tags=["machine-learning"])
+api_router.include_router(ml_tasks_router, prefix="/ml_tasks", tags=["machine_learning"])
