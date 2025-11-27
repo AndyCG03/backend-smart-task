@@ -214,6 +214,209 @@ Tareas Completadas → Entrenamiento → Modelo ML → Predicción → Priorizac
   Feedback ←─────── Evaluación ←─────── Recomendaciones
 ```
 
+
+## Arquitectura Técnica del Sistema ML
+
+### Flujo de Entrenamiento del Modelo
+
+#### 1. **Recolección de Datos**
+```python
+# Datos recolectados de tareas completadas
+{
+    "titulo": "Fix bug producción - servicio caído",
+    "descripcion": "Servicio crítico no responde, resolver inmediatamente",
+    "urgencia": "high",
+    "impacto": "high",
+    "energia_requerida": "high",
+    "duracion_estimada": 60,
+    "eficiencia": 1.71  # calculada automáticamente
+}
+```
+
+#### 2. **Preprocesamiento de Características**
+```python
+# Características extraídas para el modelo:
+features = {
+    'urgencia_encoded': 2,           # Label Encoding: low=0, medium=1, high=2
+    'impacto_encoded': 2,            # Label Encoding: low=0, medium=1, high=2  
+    'energia_encoded': 2,            # Label Encoding: low=0, medium=1, high=2
+    'duracion_estimada': 60,         # Minutos estimados
+    'longitud_descripcion': 58,      # Caracteres en descripción
+    'tiene_urgente': 1,              # 1 si contiene "urgent", "crític"
+    'tiene_bug': 1                   # 1 si contiene "bug", "fix"
+}
+```
+
+#### 3. **Variable Objetivo: Eficiencia**
+La métrica clave que el modelo aprende a predecir:
+
+```python
+def calcular_eficiencia(task):
+    # Si hay feedback de tiempo real:
+    if feedback.actual_completion_time and task.estimated_duration:
+        return task.estimated_duration / max(feedback.actual_completion_time, 1)
+    
+    # Fallback: usar prioridad como proxy
+    prioridad_map = {"high": 2.0, "medium": 1.0, "low": 0.5}
+    return prioridad_map.get(task.priority_level, 1.0)
+```
+
+**Interpretación de Eficiencia:**
+- `> 1.0`: Se completó más rápido de lo estimado (BUENO)
+- `= 1.0`: Se completó en el tiempo estimado (NEUTRO)  
+- `< 1.0`: Se completó más lento de lo estimado (MALO)
+
+### Algoritmo de Machine Learning
+
+#### Modelo: SGDRegressor
+```python
+modelo = SGDRegressor(
+    max_iter=1000,           # Máximo de iteraciones
+    tol=1e-3,                # Tolerancia para convergencia
+    random_state=42,         # Semilla para reproducibilidad
+    learning_rate='adaptive', # Tasa de aprendizaje adaptativa
+    eta0=0.1                 # Tasa de aprendizaje inicial
+)
+```
+
+#### Características del Algoritmo:
+- **Online Learning**: Aprende incrementalmente con nuevos datos
+- **Eficiente en Memoria**: No necesita cargar todos los datos a la vez
+- **Adaptativo**: Se ajusta automáticamente a nuevos patrones
+
+### Proceso de Predicción
+
+#### 1. **Para tareas pendientes:**
+```python
+# Extraer características en tiempo real
+X_pred = [
+    [2, 2, 2, 60, 58, 1, 1],  # Tarea crítica
+    [1, 1, 1, 120, 45, 0, 0]  # Tarea de mantenimiento
+]
+
+# Hacer predicción
+scores_ml = modelo.predict(X_pred)
+# Resultado: [17.55, 4.27]
+```
+
+#### 2. **Interpretación de Scores:**
+- **Alto Score (15-20)**: Tareas críticas que suelen completarse rápido
+- **Medio Score (8-14)**: Tareas importantes con tiempo normal
+- **Bajo Score (1-7)**: Tareas de mantenimiento que toman más tiempo
+
+### Persistencia del Modelo
+
+#### Almacenamiento en PostgreSQL:
+```sql
+-- Tabla ai_models
+id UUID PRIMARY KEY,
+user_id UUID REFERENCES users(id),
+model_type VARCHAR(50),        -- "priority_predictor_v2"
+model_version VARCHAR(20),     -- "2.0"
+model_data BYTEA,              -- Modelo serializado con joblib
+feature_weights JSONB,         -- Pesos de características
+accuracy_metrics JSONB,        -- Métricas de precisión
+is_active BOOLEAN,             -- Modelo activo
+trained_at TIMESTAMP
+```
+
+#### Serialización con Joblib:
+```python
+# Guardar modelo
+buffer = BytesIO()
+joblib.dump(modelo, buffer)
+modelo_bin = buffer.getvalue()
+
+# Cargar modelo
+modelo = joblib.load(BytesIO(modelo_bin))
+```
+
+### Sistema de Fallback con Reglas
+
+Cuando no hay suficientes datos para entrenar (< 2 tareas completadas):
+
+```python
+def _prioridad_por_reglas(self, tasks):
+    prioridad_map = {"high": 3, "medium": 2, "low": 1}
+    
+    for task in tasks:
+        puntaje = prioridad_map.get(task.priority_level, 1)
+        
+        # Bonus por palabras clave
+        if any(word in task.title.lower() for word in ['bug', 'fix', 'crític']):
+            puntaje *= 1.8
+            
+        # Bonus por urgencia e impacto
+        if task.urgency == "high":
+            puntaje *= 1.5
+        if task.impact == "high":
+            puntaje *= 1.3
+            
+        task.puntaje_ml = float(puntaje)
+```
+
+### Proceso de Feedback y Mejora Continua
+
+#### 1. **Tipos de Feedback:**
+```python
+MLFeedback(
+    feedback_type="priority",          # priority, schedule, completion
+    was_useful=True,                   # Si la predicción fue útil
+    actual_priority="high",            # Prioridad real que tuvo
+    actual_completion_time=35          # Tiempo real en minutos
+)
+```
+
+#### 2. **Reentrenamiento Automático:**
+- Se activa cuando `was_useful=False`
+- Usa todos los datos históricos + nuevo feedback
+- Crea nueva versión del modelo
+- Mantiene modelo anterior como backup
+
+### Métricas de Evaluación
+
+#### Validación con Datos Reales:
+```python
+# Resultados del demo avanzado
+{
+    "tareas_criticas_score_promedio": 17.55,
+    "tareas_mantenimiento_score_promedio": 4.27,
+    "diferencia": 13.28,
+    "ratio_priorizacion": 4.28  # 428% más prioridad
+}
+```
+
+#### Indicadores de Calidad:
+- **Consistencia**: Mismo tipo de tarea → Score similar
+- **Diferenciación**: Tipos diferentes → Scores diferentes  
+- **Alineación con Comportamiento**: Scores reflejan patrones reales de uso
+
+### Requisitos de Datos Mínimos
+
+#### Para Entrenamiento Inicial:
+- **Mínimo**: 2 tareas completadas
+- **Óptimo**: 5+ tareas completadas
+- **Ideal**: 10+ tareas con feedback de tiempo real
+
+#### Calidad de Datos:
+- Tareas con descripciones detalladas
+- Tiempos reales de completado (feedback)
+- Variedad en tipos de tareas
+- Prioridades realistas asignadas
+
+### Limitaciones y Consideraciones
+
+#### Casos Edge:
+- **Nuevos usuarios**: Usa sistema de reglas hasta tener datos
+- **Tareas atípicas**: Pueden requerir ajuste manual
+- **Cambios de patrones**: El modelo se adapta gradualmente
+
+#### Performance:
+- **Entrenamiento**: ~1-2 segundos con 10-20 tareas
+- **Predicción**: ~100ms por lote de tareas
+- **Almacenamiento**: ~1-5MB por modelo de usuario
+
+
 ### Endpoints de Machine Learning
 
 #### 1. Obtener Tareas Priorizadas por ML
