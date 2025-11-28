@@ -196,30 +196,25 @@ curl -X POST "http://localhost:8000/api/v1/tasks/" \
 
 ## Sistema de Inteligencia Artificial
 
-El sistema incorpora un modelo de Machine Learning para la priorización inteligente de tareas y recomendaciones personalizadas.
+El sistema incorpora un modelo de Machine Learning para la priorización inteligente de tareas y recomendaciones personalizadas, con capacidad de aprendizaje continuo y adaptación contextual en tiempo real.
 
 ### Arquitectura del Sistema IA
 
 #### Componentes Principales
 
-1. **TaskAgent** - Motor principal de ML
-2. **Modelos de Base de Datos** - Almacenamiento de modelos y datos de entrenamiento
+1. **TaskAgent** - Motor principal de ML con post-procesamiento contextual
+2. **Modelos de Base de Datos** - Almacenamiento de modelos y datos de entrenamiento  
 3. **Endpoints ML** - API para interactuar con el sistema IA
 
-#### Flujo de Trabajo del ML
+#### Flujo de Trabajo del Agent
 
-```
-Tareas Completadas → Entrenamiento → Modelo ML → Predicción → Priorización
-     ↑                                      ↓
-  Feedback ←─────── Evaluación ←─────── Recomendaciones
-```
+![Flujo de trabajo](images/TaskAgent.drawio.png)
 
+### Arquitectura Técnica del Sistema Agent
 
-## Arquitectura Técnica del Sistema ML
+#### Flujo de Entrenamiento del Modelo
 
-### Flujo de Entrenamiento del Modelo
-
-#### 1. **Recolección de Datos**
+##### 1. **Recolección de Datos**
 ```python
 # Datos recolectados de tareas completadas
 {
@@ -233,7 +228,7 @@ Tareas Completadas → Entrenamiento → Modelo ML → Predicción → Priorizac
 }
 ```
 
-#### 2. **Preprocesamiento de Características**
+##### 2. **Preprocesamiento de Características**
 ```python
 # Características extraídas para el modelo:
 features = {
@@ -247,7 +242,7 @@ features = {
 }
 ```
 
-#### 3. **Variable Objetivo: Eficiencia**
+##### 3. **Variable Objetivo: Eficiencia**
 La métrica clave que el modelo aprende a predecir:
 
 ```python
@@ -284,7 +279,7 @@ modelo = SGDRegressor(
 - **Eficiente en Memoria**: No necesita cargar todos los datos a la vez
 - **Adaptativo**: Se ajusta automáticamente a nuevos patrones
 
-### Proceso de Predicción
+### Proceso de Predicción y Post-procesamiento
 
 #### 1. **Para tareas pendientes:**
 ```python
@@ -297,12 +292,46 @@ X_pred = [
 # Hacer predicción
 scores_ml = modelo.predict(X_pred)
 # Resultado: [17.55, 4.27]
+
+# Aplicar post-procesamiento contextual
+scores_ajustados = []
+for score, task in zip(scores_ml, tasks):
+    ajuste = 1.0
+    if hora_actual >= 18 and task.energy_required == "high":
+        ajuste = 0.7
+    scores_ajustados.append(score * ajuste)
 ```
 
 #### 2. **Interpretación de Scores:**
 - **Alto Score (15-20)**: Tareas críticas que suelen completarse rápido
 - **Medio Score (8-14)**: Tareas importantes con tiempo normal
 - **Bajo Score (1-7)**: Tareas de mantenimiento que toman más tiempo
+
+### Post-procesamiento Contextual
+
+Después de la predicción inicial (ML o reglas), se aplica un **ajuste contextual** para adaptar las recomendaciones al momento actual del usuario:
+
+```python
+def _post_procesamiento(self, resultados):
+    hora_actual = datetime.now().hour
+    
+    # Penalizar tareas de alta energía al final del día
+    if hora_actual >= 18 and task.energy_required == "high":
+        puntaje_ml *= 0.7
+        
+    # Favorecer tareas ligeras en la noche
+    if hora_actual >= 18 and task.energy_required == "low":
+        puntaje_ml *= 1.2
+        
+    # Impulso leve para tareas con feedback negativo reciente
+    if task.id in feedback_negativo_reciente:
+        puntaje_ml *= 1.1
+```
+
+**Objetivos del post-procesamiento:**
+- Evitar sugerir tareas exigentes cuando el usuario probablemente está cansado
+- Aprovechar momentos de alta energía para tareas críticas
+- Dar seguimiento temporal a feedback reciente del usuario
 
 ### Persistencia del Modelo
 
@@ -368,7 +397,9 @@ MLFeedback(
 ```
 
 #### 2. **Reentrenamiento Automático:**
-- Se activa cuando `was_useful=False`
+- Se activa cuando `was_useful=False` **(feedback negativo)**, lo que:
+  1. **Dispara un reentrenamiento inmediato** del modelo con los datos actualizados
+  2. **Aplica un impulso temporal** (10%) a esa tarea específica durante las próximas 24h en el post-procesamiento
 - Usa todos los datos históricos + nuevo feedback
 - Crea nueva versión del modelo
 - Mantiene modelo anterior como backup
@@ -416,15 +447,14 @@ MLFeedback(
 - **Predicción**: ~100ms por lote de tareas
 - **Almacenamiento**: ~1-5MB por modelo de usuario
 
-
 ### Endpoints de Machine Learning
 
 #### 1. Obtener Tareas Priorizadas por ML
 ```http
-GET /api/v1/ml-tasks/prioritized
+GET /api/v1/ml_tasks/prioritized
 ```
 
-**Descripción:** Obtiene las tareas pendientes ordenadas por el score de prioridad calculado por el modelo ML.
+**Descripción:** Obtiene las tareas pendientes ordenadas por el score de prioridad calculado por el modelo ML (incluyendo ajustes de post-procesamiento contextual).
 
 **Ejemplo de respuesta:**
 ```json
@@ -444,12 +474,12 @@ GET /api/v1/ml-tasks/prioritized
 **Uso:**
 ```bash
 curl -H "Authorization: Bearer {token}" \
-  "http://localhost:8000/api/v1/ml-tasks/prioritized"
+  "http://localhost:8000/api/v1/ml_tasks/prioritized"
 ```
 
 #### 2. Entrenar Modelo para Tarea
 ```http
-POST /api/v1/ml-tasks/{task_id}/train
+POST /api/v1/ml_tasks/{task_id}/train
 ```
 
 **Descripción:** Entrena el modelo ML cuando se completa una tarea, usando los datos reales de ejecución.
@@ -457,7 +487,7 @@ POST /api/v1/ml-tasks/{task_id}/train
 **Ejemplo:**
 ```bash
 curl -X POST -H "Authorization: Bearer {token}" \
-  "http://localhost:8000/api/v1/ml-tasks/123e4567-e89b-12d3-a456-426614174000/train"
+  "http://localhost:8000/api/v1/ml_tasks/123e4567-e89b-12d3-a456-426614174000/train"
 ```
 
 **Respuesta:**
@@ -470,15 +500,15 @@ curl -X POST -H "Authorization: Bearer {token}" \
 
 #### 3. Obtener Horario Recomendado
 ```http
-GET /api/v1/ml-tasks/{task_id}/recommended-time
+GET /api/v1/ml_tasks/{task_id}/recommended-time
 ```
 
-**Descripción:** Obtiene el horario óptimo recomendado para ejecutar una tarea específica.
+**Descripción:** Obtiene el horario óptimo recomendado para ejecutar una tarea específica basado en su nivel de energía requerido y tipo de tarea.
 
 **Ejemplo:**
 ```bash
 curl -H "Authorization: Bearer {token}" \
-  "http://localhost:8000/api/v1/ml-tasks/123e4567-e89b-12d3-a456-426614174000/recommended-time"
+  "http://localhost:8000/api/v1/ml_tasks/123e4567-e89b-12d3-a456-426614174000/recommended-time"
 ```
 
 **Respuesta:**
@@ -492,20 +522,26 @@ curl -H "Authorization: Bearer {token}" \
 
 #### 4. Enviar Feedback ML
 ```http
-POST /api/v1/ml-tasks/{task_id}/feedback
+POST /api/v1/ml_tasks/{task_id}/feedback
 ```
 
-**Parámetros Query:**
+**Parámetros en cuerpo (JSON):**
 - `feedback_type`: Tipo de feedback (priority, schedule, completion)
 - `was_useful`: Si la predicción fue útil (true/false)
-- `actual_priority`: Prioridad real que tuvo la tarea
-- `actual_completion_time`: Tiempo real de completado en minutos
+- `actual_priority`: Prioridad real que tuvo la tarea (opcional)
+- `actual_completion_time`: Tiempo real de completado en minutos (opcional)
 
 **Ejemplo:**
 ```bash
 curl -X POST \
-  "http://localhost:8000/api/v1/ml-tasks/123e4567-e89b-12d3-a456-426614174000/feedback?feedback_type=priority&was_useful=true&actual_priority=high&actual_completion_time=90" \
-  -H "Authorization: Bearer {token}"
+  "http://localhost:8000/api/v1/ml_tasks/123e4567-e89b-12d3-a456-426614174000/feedback" \
+  -H "Authorization: Bearer {token}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "feedback_type": "completion",
+    "was_useful": true,
+    "actual_completion_time": 35
+  }'
 ```
 
 **Respuesta:**
@@ -552,43 +588,45 @@ python scripts/simulation/admin_init_simulation.py
 - Email: `admin@taskapp.com`
 - Contraseña: `Admin123!`
 
-#### 3. Script Principal de Simulación (`scripts/simulation/simulation.sh`)
+#### 3. Script Principal de Simulación (`simulate3.sh`)
 
-**Propósito:** Ejecutar un flujo completo de demostración del sistema.
+**Propósito:** Ejecutar un flujo completo de demostración del sistema ML con validación de aprendizaje.
 
 **Uso:**
 ```bash
-chmod +x scripts/simulation/simulation.sh
-./scripts/simulation/simulation.sh
+chmod +x simulate3.sh
+./simulate3.sh
 ```
 
 **Flujo de la Simulación:**
+
 1. **Inicialización:** Base de datos y usuario admin
-2. **Servidor:** Verifica/inicia servidor FastAPI
-3. **Autenticación:** Login con JWT
-4. **Creación de Tareas:** 6 tareas de ejemplo con diferentes prioridades
-5. **Integración ML:** 
-   - Priorización inteligente
-   - Completado de tareas
+2. **Autenticación:** Login con JWT
+3. **Creación de Tareas:** Tareas con patrones de comportamiento claros (críticas vs mantenimiento)
+4. **Integración ML:** 
+   - Completado de tareas con tiempos reales
    - Entrenamiento del modelo
-   - Recomendaciones de horario
+   - Validación explícita de que el modelo aprende
    - Feedback del usuario
-6. **Estadísticas:** Resumen del flujo completado
+5. **Estadísticas:** Resumen del aprendizaje con métricas de diferenciación
 
 ### Características del Modelo ML
 
 #### Algoritmos Utilizados
 - **SGDRegressor** para predicción de prioridades
-- **TF-IDF Vectorizer** para análisis de texto en descripciones
+- **TF-IDF Vectorizer** para análisis de texto en descripciones (reservado para futuras mejoras)
 - **Label Encoding** para variables categóricas
 - **Sistema de Reglas** como fallback cuando no hay datos suficientes
+- **Post-procesamiento Contextual** para adaptación en tiempo real
 
 #### Características Consideradas
-- Texto de descripción y título
+- Texto de descripción y título (palabras clave)
 - Nivel de urgencia e impacto
 - Fecha límite y tiempo estimado
 - Nivel de energía requerido
 - Historial de completado del usuario
+- Hora actual del día (post-procesamiento)
+- Feedback reciente del usuario (post-procesamiento)
 
 #### Persistencia del Modelo
 Los modelos entrenados se almacenan en la base de datos PostgreSQL en la tabla `ai_models`, permitiendo:
@@ -604,7 +642,7 @@ pip install scikit-learn pandas numpy joblib
 ```
 
 #### Datos Mínimos
-- Mínimo 3-5 tareas completadas para entrenamiento inicial
+- Mínimo 2 tareas completadas para entrenamiento inicial
 - Tareas con fechas límite para mejor precisión
 - Feedback del usuario para ajuste continuo
 
@@ -615,7 +653,7 @@ pip install scikit-learn pandas numpy joblib
 python scripts/simulation/admin_init_simulation.py
 
 # 2. Ejecutar simulación completa
-./scripts/simulation/simulation.sh
+./simulate3.sh
 
 # 3. Diagnosticar ML específicamente  
 ./scripts/diagnosticar_ml.sh
@@ -624,18 +662,142 @@ python scripts/simulation/admin_init_simulation.py
 # http://localhost:8000/docs
 ```
 
+### 🔁 ¿Cuándo y cómo se entrena el modelo de IA?
+
+El sistema de inteligencia artificial **no se entrena automáticamente en segundo plano**. En cambio, el entrenamiento se **dispara de forma intencional** en dos momentos muy específicos, y siempre se basa en **datos reales de tu comportamiento** como usuario.
+
+#### 📌 ¿Qué desencadena el entrenamiento?
+
+El entrenamiento ocurre en **dos situaciones**:
+
+1. **Cuando completas una tarea y envías feedback de tiempo real**  
+   Si marcas una tarea como "completada" y proporcionas cuánto tiempo **realmente** te tomó terminarla (por ejemplo, estimaste 60 minutos pero tardaste 35), el sistema **puede entrenarse** si hay suficientes datos acumulados.
+
+2. **Cuando indicas que una recomendación del sistema fue incorrecta**  
+   Si el sistema te sugiere una prioridad para una tarea y tú respondes **"no fue útil"** (`was_useful=false`), esto **dispara inmediatamente un reentrenamiento**. La idea es: *"El modelo se equivocó, así que aprende de este error ahora mismo."*
+
+En ambos casos, **tú controlas cuándo el sistema aprende**, ya sea al completar tareas con datos reales o al corregir sus errores.
+
+#### 📊 ¿Con qué datos se entrena?
+
+El modelo **solo se entrena con tareas que ya completaste** y que tienen **información real de ejecución**. Específicamente, necesita:
+
+- **Tus tareas marcadas como "completed"**
+- **Tiempo estimado** (el que tú asignaste al crear la tarea)
+- **Tiempo real** (el que tú reportaste al completarla, a través del feedback)
+
+Con estos datos, el sistema calcula una métrica clave llamada **"eficiencia"**:
+```
+Eficiencia = Tiempo estimado / Tiempo real
+```
+
+- Si completaste una tarea de 60 minutos en solo 30 minutos → Eficiencia = 2.0 ✅ (¡muy eficiente!)
+- Si completaste una tarea de 30 minutos en 60 minutos → Eficiencia = 0.5 ❌ (menos eficiente)
+
+Además, el sistema también considera:
+- El **título y descripción** de la tarea (para detectar si es un "bug", "urgente", etc.)
+- Los **metadatos** que asignaste (urgencia, impacto, energía requerida)
+- La **prioridad original** que le diste
+
+#### ⚙️ ¿Cómo funciona el entrenamiento paso a paso?
+
+1. **Recopilación**: El sistema busca **todas tus tareas completadas** que tienen tiempo real registrado.
+2. **Preparación**: Convierte cada tarea en un conjunto de números (características) que el modelo puede entender:
+   - Código numérico para urgencia, impacto y energía
+   - Números que indican si la tarea habla de "bugs" o "urgencias"
+   - Duración estimada y longitud de la descripción
+3. **Aprendizaje**: El modelo **SGDRegressor** analiza estas características y aprende a predecir la **"eficiencia"** esperada para tareas similares.
+4. **Guardado**: Si el entrenamiento tiene éxito, el nuevo modelo se guarda en la base de datos y se activa automáticamente para futuras predicciones.
+
+#### ⏱️ ¿Cuántos datos se necesitan?
+
+- **Mínimo absoluto**: 2 tareas completadas con feedback de tiempo real.
+- **Recomendado**: 5 o más tareas para que el modelo comience a hacer predicciones útiles.
+- **Ideal**: Cuantas más tareas completes con datos reales, mejor será el modelo.
+
+#### 🔍 ¿Qué pasa si no hay suficientes datos?
+
+Si tienes menos de 2 tareas completadas, el sistema **no entrena ningún modelo**. En su lugar, usa un **sistema de reglas inteligentes** basado en:
+- Palabras clave en el título/descripción ("bug", "urgente", "crítico")
+- Los niveles de urgencia e impacto que asignaste
+- La cercanía de la fecha límite
+
+Este sistema de reglas **siempre está disponible** como plan de respaldo, asegurando que siempre recibas recomendaciones, incluso si eres un usuario nuevo.
+
+#### 💡 En resumen
+
+- **Tú decides cuándo el sistema aprende**: al completar tareas con tiempo real o al corregir errores.
+- **El modelo se entrena solo con tu historial personal**: no usa datos de otros usuarios.
+- **El objetivo es predecir qué tareas merecen prioridad** porque **tú las completas eficientemente** (rápido y bien).
+- **Siempre hay un plan B**: el sistema de reglas garantiza funcionalidad desde el primer día.
+
+¡Por supuesto! Aquí tienes una sección explicativa en el mismo estilo claro y accesible, perfecta para incluir en tu documento markdown:
+
+---
+
+### 🤔 ¿Por qué usamos SGDRegressor y no otro algoritmo de Machine Learning?
+
+Al diseñar el sistema de priorización inteligente, evaluamos varias opciones de algoritmos de machine learning. Elegimos **SGDRegressor** (Stochastic Gradient Descent Regressor) no por ser el más avanzado, sino por ser el **más adecuado** para las necesidades específicas de un sistema de productividad personal. Aquí te explicamos por qué.
+
+#### 🎯 Requisitos clave del sistema
+
+Antes de elegir un algoritmo, definimos lo que **realmente necesitábamos**:
+
+1. **Ligereza**: El sistema debe funcionar rápido, incluso en dispositivos con recursos limitados.
+2. **Aprendizaje incremental**: Debe poder aprender de **pocos datos** (muchos usuarios tendrán solo unas pocas tareas completadas al principio).
+3. **Bajo costo computacional**: El entrenamiento no debe ralentizar la aplicación ni consumir mucha memoria.
+4. **Interpretabilidad parcial**: Si algo falla, debemos poder entender por qué.
+5. **Personalización por usuario**: Cada usuario tiene su propio modelo, así que necesitamos algo que se pueda entrenar y guardar fácilmente miles de veces.
+
+#### ❌ ¿Por qué NO usamos otros algoritmos?
+
+- **Redes neuronales**: Requieren muchos datos para entrenar bien y son "cajas negras". Si el modelo se equivoca, es muy difícil entender por qué. Además, son pesadas para un sistema que debe responder en milisegundos.
+
+- **Árboles de decisión o Random Forest**: Aunque son interpretables, **no funcionan bien con pocos datos** (menos de 10-20 ejemplos). También consumen más memoria y son más lentos para guardar/cargar.
+
+- **Regresión lineal clásica**: Es ligera, pero **no maneja bien el aprendizaje incremental**. Cada vez que se añade un nuevo dato, hay que reentrenar todo desde cero, lo que es ineficiente.
+
+- **Modelos basados en instancias (como K-NN)**: Requieren guardar **todos los datos históricos** en memoria para hacer predicciones, lo que no escala bien cuando un usuario tiene cientos de tareas.
+
+#### ✅ ¿Por qué SÍ SGDRegressor?
+
+SGDRegressor cumple **perfectamente** con todos nuestros requisitos:
+
+- **Extremadamente ligero**: Usa muy poca memoria y CPU, ideal para entrenamientos rápidos.
+- **Aprendizaje con pocos datos**: Aunque el modelo mejora con más datos, puede **empezar a aprender con solo 2-3 tareas completadas**, lo que es crucial para usuarios nuevos.
+- **Entrenamiento eficiente**: Procesa los datos de forma secuencial y **no necesita cargar todo el dataset en memoria**, lo que lo hace ideal para entornos con recursos limitados.
+- **Compatible con el flujo de usuario**: Cada vez que completas una tarea, el sistema puede **actualizar el modelo rápidamente** sin reiniciar todo.
+- **Suficientemente potente**: Aunque es un modelo lineal, al combinarlo con **características bien diseñadas** (como "tiene_bug", "urgencia_codificada", etc.), logra capturar patrones complejos de comportamiento.
+- **Fácil de guardar y cargar**: El modelo entrenado ocupa muy poco espacio (1-5 MB) y se serializa fácilmente con `joblib`, lo que permite almacenarlo en la base de datos sin problemas.
+
+#### 💡 Analogía simple
+
+Piensa en SGDRegressor como un **estudiante muy eficiente**:
+- No necesita leer cientos de libros para aprender (pocos datos bastan).
+- Aprende de cada experiencia nueva inmediatamente.
+- No ocupa mucho espacio en su escritorio (bajo consumo de memoria).
+- Puede explicar sus decisiones en términos simples ("le doy más prioridad a las tareas con 'bug' porque históricamente las completas rápido").
+
+En cambio, otros algoritmos serían como estudiantes que necesitan una biblioteca completa, mucho tiempo de estudio y espacio de trabajo, lo que no es práctico para un sistema de productividad personal.
+
+#### 📊 Resultado en la práctica
+
+Gracias a esta elección:
+- El **entrenamiento toma menos de 2 segundos** incluso en servidores modestos.
+- La **predicción es casi instantánea** (menos de 100ms para decenas de tareas).
+- El sistema **empieza a ser útil desde el primer día**, sin necesidad de un largo período de "entrenamiento inicial".
+- El **consumo de recursos es mínimo**, permitiendo ejecutar el sistema en casi cualquier entorno.
+
 ### Solución de Problemas ML
 
 #### Error: "No hay suficientes datos para entrenar"
-**Solución:** Completar más tareas para generar historial de entrenamiento.
+**Solución:** Completar más tareas para generar historial de entrenamiento (mínimo 2 tareas completadas).
 
 #### Error: "Endpoints ML no disponibles"
-**Solución:** Verificar que las dependencias de ML estén instaladas y reiniciar el servidor.
+**Solución:** Verificar que las rutas usen **`/ml_tasks/`** (con guión bajo `_`) y no `/ml-tasks/`. Verificar que las dependencias de ML estén instaladas y reiniciar el servidor.
 
 #### Error: "Modelo no carga correctamente"
-**Solución:** Ejecutar el script de diagnóstico para identificar el problema específico.
-
-
+**Solución:** Ejecutar el script de diagnóstico para identificar el problema específico. Verificar permisos de base de datos y espacio de almacenamiento.
 
 ## Configuración de Desarrollo
 

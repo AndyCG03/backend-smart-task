@@ -145,20 +145,20 @@ print_color "$YELLOW" "🏃 Completando tareas con patrones de productividad..."
 # Completar tareas críticas RÁPIDO (alta productividad)
 print_color "$GREEN" "   ✅ Completando tarea crítica en 35min (rápido)"
 make_request "PUT" "/api/v1/tasks/$TASK1_ID" '{"status": "completed"}' > /dev/null
-make_request "POST" "/api/v1/ml-tasks/$TASK1_ID/feedback?feedback_type=completion&was_useful=true&actual_completion_time=35" > /dev/null
+make_request "POST" "/api/v1/ml_tasks/$TASK1_ID/feedback?feedback_type=completion&was_useful=true&actual_completion_time=35" > /dev/null
 
 print_color "$GREEN" "   ✅ Completando tarea cliente en 25min (muy rápido)" 
 make_request "PUT" "/api/v1/tasks/$TASK2_ID" '{"status": "completed"}' > /dev/null
-make_request "POST" "/api/v1/ml-tasks/$TASK2_ID/feedback?feedback_type=completion&was_useful=true&actual_completion_time=25" > /dev/null
+make_request "POST" "/api/v1/ml_tasks/$TASK2_ID/feedback?feedback_type=completion&was_useful=true&actual_completion_time=25" > /dev/null
 
 # Completar tareas de baja prioridad LENTO
 print_color "$YELLOW" "   🐌 Completando tarea documentación en 180min (lento)"
 make_request "PUT" "/api/v1/tasks/$TASK3_ID" '{"status": "completed"}' > /dev/null
-make_request "POST" "/api/v1/ml-tasks/$TASK3_ID/feedback?feedback_type=completion&was_useful=true&actual_completion_time=180" > /dev/null
+make_request "POST" "/api/v1/ml_tasks/$TASK3_ID/feedback?feedback_type=completion&was_useful=true&actual_completion_time=180" > /dev/null
 
 print_color "$YELLOW" "   🐌 Completando tarea investigación en 150min (lento)"
 make_request "PUT" "/api/v1/tasks/$TASK4_ID" '{"status": "completed"}' > /dev/null  
-make_request "POST" "/api/v1/ml-tasks/$TASK4_ID/feedback?feedback_type=completion&was_useful=true&actual_completion_time=150" > /dev/null
+make_request "POST" "/api/v1/ml_tasks/$TASK4_ID/feedback?feedback_type=completion&was_useful=true&actual_completion_time=150" > /dev/null
 
 echo ""
 
@@ -167,7 +167,7 @@ print_color "$CYAN" "🎯 CASO 3: Entrenando modelo con patrones aprendidos..."
 echo ""
 
 print_color "$YELLOW" "📈 Entrenando modelo ML..."
-TRAIN_RESPONSE=$(make_request "POST" "/api/v1/ml-tasks/$TASK1_ID/train")
+TRAIN_RESPONSE=$(make_request "POST" "/api/v1/ml_tasks/$TASK1_ID/train")
 echo "   Respuesta: $TRAIN_RESPONSE"
 
 # Esperar un poco para procesamiento
@@ -215,7 +215,7 @@ echo ""
 
 # Obtener priorización ML actualizada
 print_color "$YELLOW" "🧠 Obteniendo priorización ML actualizada..."
-ML_RESPONSE=$(make_request "GET" "/api/v1/ml-tasks/prioritized")
+ML_RESPONSE=$(make_request "GET" "/api/v1/ml_tasks/prioritized")
 
 echo ""
 print_color "$CYAN" "📊 RESULTADOS DEL APRENDIZAJE:"
@@ -298,12 +298,12 @@ TASK7_ID=$(echo "$TASK7" | python3 -c "import sys, json; print(json.load(sys.std
 
 # Completar rápidamente
 make_request "PUT" "/api/v1/tasks/$TASK7_ID" '{"status": "completed"}' > /dev/null
-make_request "POST" "/api/v1/ml-tasks/$TASK7_ID/feedback?feedback_type=completion&was_useful=true&actual_completion_time=40" > /dev/null
+make_request "POST" "/api/v1/ml_tasks/$TASK7_ID/feedback?feedback_type=completion&was_useful=true&actual_completion_time=40" > /dev/null
 
 print_color "$GREEN" "   ✅ Tarea seguridad completada en 40min"
 
 # Re-entrenar modelo
-make_request "POST" "/api/v1/ml-tasks/$TASK7_ID/train" > /dev/null
+make_request "POST" "/api/v1/ml_tasks/$TASK7_ID/train" > /dev/null
 
 echo ""
 
