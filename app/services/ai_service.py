@@ -1,8 +1,5 @@
-# app/services/task_agent.py
 import pandas as pd
-from sklearn.linear_model import SGDRegressor
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.preprocessing import LabelEncoder
+from sklearn.tree import DecisionTreeClassifier
 from datetime import datetime
 import numpy as np
 from sqlalchemy.orm import Session
@@ -15,32 +12,48 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from app.models.database_models import Task, TaskMLData, MLFeedback, AIModel
+from app.models.database_models import Task, MLFeedback, AIModel
+
+
+# Mapeos fijos (no requieren persistencia)
+URGENCIA_MAP = {"low": 0, "medium": 1, "high": 2}
+IMPACTO_MAP = {"low": 0, "medium": 1, "high": 2}
+ENERGIA_MAP = {"low": 0, "medium": 1, "high": 2}
+PRIORIDAD_MAP = {"low": 1, "medium": 2, "high": 3}
+
+
+def _normalizar_nivel(valor: str) -> str:
+    if not valor:
+        return "medium"
+    v = str(valor).lower().strip()
+    if v in ("high", "critical", "crític", "urgent", "crucial"):
+        return "high"
+    elif v in ("low", "baja", "minimum"):
+        return "low"
+    else:
+        return "medium"
 
 
 class TaskAgent:
     """
-    Agente de priorización de tareas personalizado por usuario.
-    Combina machine learning (SGDRegressor) y reglas heurísticas,
-    con enriquecimiento de texto, post-procesamiento contextual,
-    y reentrenamiento basado en feedback.
+    Agente de priorización con ML robusto y reglas de respaldo.
+    Usa DecisionTreeClassifier para clasificar tareas en niveles de prioridad.
     """
 
-    def __init__(self, db: Session, user_id: uuid.UUID = None):
+    def __init__(self, db: Session, user_id: uuid.UUID):
         self.db = db
         self.user_id = user_id
         self.modelo = None
-        # Vectorizador declarado pero no usado actualmente (reservado para features textuales futuras)
-        self.vectorizador = TfidfVectorizer(max_features=50, stop_words='english')
-        self.encoder_urgencia = LabelEncoder()
-        self.encoder_impacto = LabelEncoder()
-        self.encoder_energia = LabelEncoder()
-
+        self.feature_names = [
+            'urgencia_encoded', 'impacto_encoded', 'energia_encoded',
+            'duracion_estimada', 'longitud_descripcion',
+            'tiene_urgente', 'tiene_bug', 'deadline_proximo'
+        ]
         logger.info(f"🔄 Inicializando TaskAgent para usuario: {user_id}")
         self._cargar_modelo()
 
     def _cargar_modelo(self):
-        """Carga el modelo ML más reciente y activo del usuario desde la base de datos."""
+        """Carga el modelo ML más reciente y activo del usuario"""
         try:
             logger.info("🔍 Buscando modelo ML en base de datos...")
             modelo_db = self.db.query(AIModel).filter(
@@ -48,14 +61,15 @@ class TaskAgent:
                 AIModel.is_active == True
             ).order_by(AIModel.trained_at.desc()).first()
 
-            if modelo_db and modelo_db.model_data:
-                logger.info(f"✅ Modelo encontrado: {modelo_db.model_type} v{modelo_db.model_version}")
+            if modelo_db and modelo_db.model_data and len(modelo_db.model_data) > 0:
+                logger.info(f"✅ Modelo encontrado ({len(modelo_db.model_data)} bytes)")
                 try:
                     buffer = BytesIO(modelo_db.model_data)
                     self.modelo = joblib.load(buffer)
-                    logger.info("✅ Modelo cargado exitosamente")
+                    logger.info(f"✅ Modelo cargado exitosamente: {type(self.modelo)}")
                 except Exception as e:
                     logger.error(f"❌ Error al cargar el modelo: {e}")
+                    logger.error(traceback.format_exc())
                     self.modelo = None
             else:
                 logger.info("ℹ️ No se encontró modelo activo. Se usará sistema de reglas.")
@@ -63,359 +77,345 @@ class TaskAgent:
 
         except Exception as e:
             logger.error(f"❌ Error en _cargar_modelo: {e}")
+            logger.error(traceback.format_exc())
             self.modelo = None
 
     def _preparar_datos_entrenamiento(self):
-        """
-        Prepara un DataFrame con tareas completadas del usuario para entrenar el modelo.
-        Extrae características textuales y metadatos, y calcula la eficiencia real.
-        """
+        """Prepara datos de tareas completadas para entrenamiento"""
         try:
-            tareas_completadas = self.db.query(Task).filter(
+            tareas = self.db.query(Task).filter(
                 Task.user_id == self.user_id,
                 Task.status == 'completed'
             ).all()
+            logger.info(f"📊 Tareas completadas encontradas para entrenamiento: {len(tareas)}")
 
-            logger.info(f"📊 Tareas completadas encontradas: {len(tareas_completadas)}")
-
-            if len(tareas_completadas) < 2:
-                logger.warning("⚠️ Menos de 2 tareas completadas. Entrenamiento no posible.")
-                return None
+            if len(tareas) < 3:
+                logger.warning(f"⚠️ Insuficientes tareas completadas ({len(tareas)}/3). No se entrenará ML.")
+                return None, None
 
             datos = []
-            for task in tareas_completadas:
+            objetivos = []
+            
+            for task in tareas:
+                # Obtener feedback para esta tarea
+                feedback = self.db.query(MLFeedback).filter(
+                    MLFeedback.task_id == task.id,
+                    MLFeedback.actual_priority.isnot(None)
+                ).order_by(MLFeedback.created_at.desc()).first()
+                
+                # Determinar prioridad objetivo
+                prioridad_objetivo = feedback.actual_priority if feedback else task.priority_level
+                prioridad_objetivo = _normalizar_nivel(prioridad_objetivo)
+                
+                # Calcular si tiene deadline próximo
+                deadline_proximo = 0
+                if task.deadline:
+                    dias = (task.deadline - datetime.now()).days
+                    deadline_proximo = 1 if dias <= 1 else 0
+                
                 dato = {
-                    "titulo": task.title or "",
-                    "descripcion": task.description or "",
-                    "urgencia": task.urgency or "medium",
-                    "impacto": task.impact or "medium",
-                    "energia_requerida": task.energy_required or "medium",
-                    "prioridad_original": task.priority_level or "medium",
-                    "duracion_estimada": task.estimated_duration or 60,
-                    "eficiencia": self._calcular_eficiencia(task)
+                    "urgencia_encoded": URGENCIA_MAP.get(_normalizar_nivel(task.urgency), 1),
+                    "impacto_encoded": IMPACTO_MAP.get(_normalizar_nivel(task.impact), 1),
+                    "energia_encoded": ENERGIA_MAP.get(_normalizar_nivel(task.energy_required), 1),
+                    "duracion_estimada": float(task.estimated_duration or 60),
+                    "longitud_descripcion": len(task.description or ""),
+                    "tiene_urgente": 1 if "urgent" in (task.description or "").lower() or "crític" in (task.title or "").lower() else 0,
+                    "tiene_bug": 1 if "bug" in (task.title or "").lower() or "fix" in (task.title or "").lower() else 0,
+                    "deadline_proximo": deadline_proximo
                 }
-
-                # Características derivadas del texto
-                dato["longitud_descripcion"] = len(dato["descripcion"])
-                dato["tiene_urgente"] = 1 if "urgent" in dato["descripcion"].lower() or "crític" in dato["titulo"].lower() else 0
-                dato["tiene_bug"] = 1 if "bug" in dato["titulo"].lower() or "fix" in dato["titulo"].lower() else 0
-
                 datos.append(dato)
+                objetivos.append(PRIORIDAD_MAP[prioridad_objetivo])
 
-            return pd.DataFrame(datos) if datos else None
+            return pd.DataFrame(datos), np.array(objetivos)
 
         except Exception as e:
             logger.error(f"❌ Error en _preparar_datos_entrenamiento: {e}")
-            return None
-
-    def _calcular_eficiencia(self, task: Task) -> float:
-        """
-        Calcula la eficiencia como: tiempo_estimado / tiempo_real.
-        Si no hay tiempo real, usa la prioridad como proxy razonable.
-        """
-        try:
-            feedback = self.db.query(MLFeedback).filter(
-                MLFeedback.task_id == task.id,
-                MLFeedback.actual_completion_time.isnot(None)
-            ).first()
-
-            if feedback and feedback.actual_completion_time and task.estimated_duration:
-                eficiencia = task.estimated_duration / max(feedback.actual_completion_time, 1)
-                return min(eficiencia, 3.0)  # Evitar valores extremos
-
-            # Fallback: prioridad como indicador de importancia/eficiencia esperada
-            prioridad_map = {"high": 2.0, "medium": 1.0, "low": 0.5}
-            return prioridad_map.get(task.priority_level or "medium", 1.0)
-
-        except Exception as e:
-            logger.error(f"❌ Error al calcular eficiencia: {e}")
-            return 1.0
+            logger.error(traceback.format_exc())
+            return None, None
 
     def entrenar_modelo_prioridad(self) -> bool:
-        """
-        Entrena un modelo SGDRegressor usando eficiencia como variable objetivo.
-        Requiere al menos 2 tareas completadas.
-        """
-        try:
-            logger.info("🎯 Iniciando entrenamiento del modelo...")
-            df = self._preparar_datos_entrenamiento()
-            if df is None or len(df) < 2:
-                logger.warning(f"❌ Insuficientes datos para entrenar: {len(df) if df else 0}/2")
-                return False
-
-            logger.info(f"📈 Dataset preparado: {len(df)} registros")
-
-            try:
-                # Codificar variables categóricas
-                df['urgencia_encoded'] = self.encoder_urgencia.fit_transform(df['urgencia'])
-                df['impacto_encoded'] = self.encoder_impacto.fit_transform(df['impacto'])
-                df['energia_encoded'] = self.encoder_energia.fit_transform(df['energia_requerida'])
-
-                features = [
-                    'urgencia_encoded', 'impacto_encoded', 'energia_encoded',
-                    'duracion_estimada', 'longitud_descripcion',
-                    'tiene_urgente', 'tiene_bug'
-                ]
-
-                X = df[features].values
-                y = df['eficiencia'].values
-
-                logger.info(f"🔢 Características: {X.shape}, Target: {y.shape}")
-
-                # Entrenar modelo ligero y eficiente
-                self.modelo = SGDRegressor(
-                    max_iter=1000,
-                    tol=1e-3,
-                    random_state=42,
-                    learning_rate='adaptive',
-                    eta0=0.1
-                )
-                self.modelo.fit(X, y)
-
-                logger.info("✅ Modelo entrenado exitosamente")
-                self._guardar_modelo(self.modelo, "priority_predictor_v2")
-                return True
-
-            except Exception as e:
-                logger.error(f"❌ Error en el proceso de entrenamiento: {e}")
-                return False
-
-        except Exception as e:
-            logger.error(f"❌ Error general en entrenar_modelo_prioridad: {e}")
-            traceback.print_exc()
+        """Entrena un modelo con DecisionTreeClassifier"""
+        X_df, y = self._preparar_datos_entrenamiento()
+        if X_df is None or y is None or len(X_df) < 3:
+            logger.warning("🧠 No hay suficientes datos para entrenar modelo ML. Usando reglas.")
+            self.modelo = None
             return False
 
-    def _post_procesamiento(self, resultados: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Aplica ajustes contextuales finos a los puntajes después de la predicción.
-        Usa la hora actual y feedback reciente para refinar la prioridad.
-        """
         try:
-            hora_actual = datetime.now().hour
+            logger.info(f"🎯 Entrenando modelo con {len(X_df)} tareas...")
+            logger.info(f"Dataset de entrenamiento:\n{X_df.head()}")
+            logger.info(f"Objetivos (prioridades): {y}")
 
-            # Identificar tareas con feedback negativo en las últimas 24h
-            veinticuatro_horas = datetime.now() - pd.Timedelta(hours=24)
-            feedbacks_negativos_recientes = self.db.query(MLFeedback).filter(
-                MLFeedback.user_id == self.user_id,
-                MLFeedback.created_at >= veinticuatro_horas,
-                MLFeedback.was_useful == False
-            ).all()
-            task_ids_feedback = {f.task_id for f in feedbacks_negativos_recientes}
+            # Entrenar modelo
+            self.modelo = DecisionTreeClassifier(
+                max_depth=3,  # Evitar overfitting
+                random_state=42,
+                class_weight="balanced"
+            )
+            self.modelo.fit(X_df.values, y)
 
-            for item in resultados:
-                puntaje_original = item['puntaje_ml']
-                task = item['task_obj']
-                energia = task.energy_required or "medium"
-                duracion = task.estimated_duration or 60
-
-                ajuste = 1.0
-
-                # Ajuste por hora del día y energía requerida
-                if hora_actual >= 18:  # Tarde/noche
-                    if energia == "high":
-                        ajuste *= 0.7   # Penalizar alta energía
-                    elif energia == "low":
-                        ajuste *= 1.2   # Favorecer tareas ligeras
-                elif 7 <= hora_actual <= 10:  # Mañana temprano
-                    if energia == "high":
-                        ajuste *= 1.15  # Ideal para tareas exigentes
-
-                # Penalizar tareas muy largas al final del día
-                if hora_actual >= 17 and duracion > 120:
-                    ajuste *= 0.85
-
-                # Impulso leve si hubo feedback negativo reciente
-                # Interpretación: "el modelo subestimó esta tarea, así que aumenta su peso"
-                if task.id in task_ids_feedback:
-                    ajuste *= 1.1
-
-                # Aplicar ajuste, evitando puntajes nulos
-                item['puntaje_ml'] = max(puntaje_original * ajuste, 0.01)
-
-            logger.info("⚙️ Post-procesamiento aplicado a puntajes de prioridad")
-            return resultados
+            # Guardar modelo
+            self._guardar_modelo()
+            logger.info("✅ Modelo entrenado y guardado exitosamente")
+            return True
 
         except Exception as e:
-            logger.error(f"❌ Error en post-procesamiento: {e}")
-            return resultados  # Devuelve sin cambios si falla
+            logger.error(f"❌ Error fatal en entrenamiento: {e}")
+            logger.error(traceback.format_exc())
+            self.modelo = None
+            return False
 
-    def predecir_prioridad_tareas(self, tasks: List[Task]) -> List[Dict[str, Any]]:
-        """
-        Predice y ordena tareas pendientes usando ML (si está disponible) o reglas.
-        Aplica post-procesamiento y devuelve lista ordenada por prioridad.
-        """
-        try:
-            logger.info(f"🔮 Prediciendo prioridad para {len(tasks)} tareas")
+    def _guardar_modelo(self):
+        """Guarda el modelo en la base de datos"""
+        if self.modelo is None:
+            logger.warning("⚠️ No se puede guardar: modelo no entrenado.")
+            return
 
-            if not tasks:
-                return []
-
-            # Elegir estrategia: ML o reglas
-            if self.modelo is None:
-                logger.info("🤖 Modelo no disponible. Usando sistema de reglas.")
-                resultados = self._prioridad_por_reglas(tasks)
-            else:
-                # Preparar datos para predicción
-                datos_pred = []
-                for task in tasks:
-                    dato = {
-                        'task_obj': task,
-                        'urgencia': task.urgency or 'medium',
-                        'impacto': task.impact or 'medium',
-                        'energia_requerida': task.energy_required or 'medium',
-                        'duracion_estimada': task.estimated_duration or 60,
-                        'descripcion': task.description or "",
-                        'titulo': task.title or ""
-                    }
-                    dato['longitud_descripcion'] = len(dato['descripcion'])
-                    dato['tiene_urgente'] = 1 if "urgent" in dato['descripcion'].lower() or "crític" in dato['titulo'].lower() else 0
-                    dato['tiene_bug'] = 1 if "bug" in dato['titulo'].lower() or "fix" in dato['titulo'].lower() else 0
-                    datos_pred.append(dato)
-
-                try:
-                    # Codificar categorías usando los mismos encoders del entrenamiento
-                    urgencias_encoded = self.encoder_urgencia.transform([d['urgencia'] for d in datos_pred])
-                    impactos_encoded = self.encoder_impacto.transform([d['impacto'] for d in datos_pred])
-                    energias_encoded = self.encoder_energia.transform([d['energia_requerida'] for d in datos_pred])
-
-                    X_pred = np.array([
-                        urgencias_encoded,
-                        impactos_encoded,
-                        energias_encoded,
-                        [d['duracion_estimada'] for d in datos_pred],
-                        [d['longitud_descripcion'] for d in datos_pred],
-                        [d['tiene_urgente'] for d in datos_pred],
-                        [d['tiene_bug'] for d in datos_pred]
-                    ]).T
-
-                    predicciones = self.modelo.predict(X_pred)
-
-                    resultados = []
-                    for i, dato in enumerate(datos_pred):
-                        resultados.append({
-                            'task_obj': dato['task_obj'],
-                            'puntaje_ml': float(predicciones[i]),
-                            'titulo': dato['titulo'],
-                            'prioridad_original': dato['task_obj'].priority_level or "medium"
-                        })
-
-                except Exception as e:
-                    logger.error(f"❌ Error en predicción con ML: {e}")
-                    resultados = self._prioridad_por_reglas(tasks)
-
-            # Aplicar post-procesamiento contextual a ambos flujos (ML y reglas)
-            resultados = self._post_procesamiento(resultados)
-
-            # Ordenar por puntaje final
-            resultados_ordenados = sorted(resultados, key=lambda x: x['puntaje_ml'], reverse=True)
-            logger.info(f"✅ Predicción completada para {len(resultados_ordenados)} tareas")
-            return resultados_ordenados
-
-        except Exception as e:
-            logger.error(f"❌ Error en predecir_prioridad_tareas: {e}")
-            # Fallback seguro
-            resultados = self._prioridad_por_reglas(tasks)
-            resultados = self._post_procesamiento(resultados)
-            return sorted(resultados, key=lambda x: x['puntaje_ml'], reverse=True)
-
-    def _prioridad_por_reglas(self, tasks: List[Task]) -> List[Dict[str, Any]]:
-        """
-        Sistema de respaldo basado en reglas heurísticas.
-        Se usa cuando no hay modelo entrenado.
-        """
-        logger.info("📋 Usando sistema de reglas para priorización")
-
-        prioridad_map = {"high": 3, "medium": 2, "low": 1}
-        urgencia_map = {"high": 1.5, "medium": 1.2, "low": 1.0}
-        impacto_map = {"high": 1.3, "medium": 1.1, "low": 1.0}
-
-        resultados = []
-        for task in tasks:
-            puntaje_base = prioridad_map.get(task.priority_level or "medium", 1)
-
-            # Ajuste por palabras clave en título o descripción
-            descripcion = (task.description or "").lower()
-            titulo = (task.title or "").lower()
-
-            if any(word in titulo for word in ['bug', 'fix', 'crític', 'urgent', 'hotfix']):
-                puntaje_base *= 1.8
-            elif any(word in descripcion for word in ['urgent', 'important', 'critical']):
-                puntaje_base *= 1.4
-
-            # Ajuste por metadatos
-            puntaje_base *= urgencia_map.get(task.urgency or "medium", 1.0)
-            puntaje_base *= impacto_map.get(task.impact or "medium", 1.0)
-
-            # Ajuste por deadline cercano
-            if task.deadline:
-                dias_restantes = (task.deadline - datetime.now()).days
-                if dias_restantes <= 0:
-                    puntaje_base *= 2.5
-                elif dias_restantes <= 1:
-                    puntaje_base *= 2.0
-                elif dias_restantes <= 3:
-                    puntaje_base *= 1.5
-
-            resultados.append({
-                'task_obj': task,
-                'puntaje_ml': float(puntaje_base),
-                'titulo': task.title,
-                'prioridad_original': task.priority_level or "medium"
-            })
-
-        return resultados
-
-    def _guardar_modelo(self, modelo, model_type: str = "priority_predictor"):
-        """Guarda el modelo serializado en la tabla AIModel."""
         try:
             # Desactivar versiones anteriores
             self.db.query(AIModel).filter(
                 AIModel.user_id == self.user_id,
-                AIModel.model_type == model_type
+                AIModel.model_type == "priority_predictor_v3"
             ).update({"is_active": False})
+            self.db.commit()
 
+            # Guardar nuevo modelo
             buffer = BytesIO()
-            joblib.dump(modelo, buffer)
+            joblib.dump(self.modelo, buffer)
             modelo_bin = buffer.getvalue()
 
             nuevo_modelo = AIModel(
                 user_id=self.user_id,
-                model_type=model_type,
-                model_version="2.0",
+                model_type="priority_predictor_v3",
+                model_version="3.1",
                 model_data=modelo_bin,
-                feature_weights={},
-                accuracy_metrics={"trained_at": datetime.now().isoformat()},
                 is_active=True
             )
 
             self.db.add(nuevo_modelo)
             self.db.commit()
-            logger.info("💾 Modelo guardado en base de datos")
+            logger.info(f"💾 Modelo guardado ({len(modelo_bin)} bytes)")
 
         except Exception as e:
             logger.error(f"❌ Error al guardar el modelo: {e}")
+            logger.error(traceback.format_exc())
             self.db.rollback()
 
-    def recomendar_horario(self, task: Task) -> str:
-        """
-        Recomienda una hora del día basada en la energía requerida y el tipo de tarea.
-        """
+    def _post_procesamiento(self, resultados: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Aplica ajustes contextuales a los puntajes"""
         try:
-            hora_recomendada = "10:00"
+            hora_actual = datetime.now().hour
+            logger.info(f"⏰ Hora actual: {hora_actual}:00")
 
-            energia = task.energy_required or "medium"
+            # Identificar tareas con feedback negativo reciente
+            veinticuatro_horas = datetime.now() - pd.Timedelta(hours=24)
+            feedbacks_negativos = self.db.query(MLFeedback).filter(
+                MLFeedback.user_id == self.user_id,
+                MLFeedback.created_at >= veinticuatro_horas,
+                MLFeedback.was_useful == False
+            ).all()
+            task_ids_con_feedback = {f.task_id for f in feedbacks_negativos}
+
+            for item in resultados:
+                task = item['task_obj']
+                energia = task.energy_required or "medium"
+                duracion = task.estimated_duration or 60
+                ajuste = 1.0
+
+                # Ajuste por hora del día y energía
+                if hora_actual >= 18:  # Tarde/noche
+                    if energia == "high":
+                        ajuste *= 0.7
+                    elif energia == "low":
+                        ajuste *= 1.3
+                elif 7 <= hora_actual <= 10:  # Mañana
+                    if energia == "high":
+                        ajuste *= 1.2
+
+                # Penalizar tareas largas al final del día
+                if hora_actual >= 17 and duracion > 120:
+                    ajuste *= 0.8
+
+                # Ajuste por feedback negativo reciente (el sistema subestimó esta tarea)
+                if task.id in task_ids_con_feedback:
+                    ajuste *= 1.3
+                    logger.info(f"📈 Aumentando prioridad por feedback negativo en tarea: {task.title}")
+
+                # Ajuste por deadline próximo
+                if task.deadline:
+                    dias = (task.deadline - datetime.now()).days
+                    if dias < 0:
+                        ajuste *= 1.5
+                    elif dias == 0:
+                        ajuste *= 1.4
+                    elif dias <= 1:
+                        ajuste *= 1.2
+
+                puntaje_original = item['puntaje_ml']
+                item['puntaje_ml'] = max(puntaje_original * ajuste, 0.5)
+                logger.debug(f"📊 {task.title[:30]}: {puntaje_original:.2f} → {item['puntaje_ml']:.2f} (ajuste: {ajuste:.2f})")
+
+            logger.info("✅ Post-procesamiento aplicado correctamente")
+            return resultados
+        except Exception as e:
+            logger.error(f"❌ Error en post-procesamiento: {e}")
+            logger.error(traceback.format_exc())
+            return resultados
+
+    def _prioridad_por_reglas(self, tasks: List[Task]) -> List[Dict[str, Any]]:
+        """Sistema de respaldo basado en reglas heurísticas"""
+        logger.info("📋 Usando sistema de reglas para priorización (no hay suficientes datos para ML)")
+        prioridad_map = {"high": 3.0, "medium": 2.0, "low": 1.0}
+        urgencia_map = {"high": 1.4, "medium": 1.1, "low": 1.0}
+        impacto_map = {"high": 1.3, "medium": 1.1, "low": 1.0}
+
+        resultados = []
+        for task in tasks:
+            puntaje = prioridad_map.get(task.priority_level or "medium", 2.0)
             titulo = (task.title or "").lower()
+            desc = (task.description or "").lower()
 
-            if energia == "high" or any(word in titulo for word in ['bug', 'fix', 'critical']):
-                hora_recomendada = "08:00"   # Mañana temprano
-            elif energia == "medium":
-                hora_recomendada = "14:00"   # Tarde
-            else:
-                hora_recomendada = "16:00"   # Final del día
+            # Ajuste por palabras clave en título
+            if any(w in titulo for w in ['bug', 'fix', 'crític', 'urgent', 'hotfix', 'error', 'caído', 'seguridad']):
+                puntaje *= 1.8
+                logger.debug(f"🔧 Palabra clave crítica en título: {task.title}")
+            # Ajuste por palabras clave en descripción
+            elif any(w in desc for w in ['urgent', 'important', 'critical', 'importante', 'crític']):
+                puntaje *= 1.5
+                logger.debug(f"❗ Palabra clave urgente en descripción: {task.title}")
 
-            logger.info(f"⏰ Horario recomendado para '{task.title}': {hora_recomendada}")
-            return hora_recomendada
+            # Ajuste por metadatos
+            puntaje *= urgencia_map.get(task.urgency or "medium", 1.0)
+            puntaje *= impacto_map.get(task.impact or "medium", 1.0)
+
+            # Ajuste por deadline
+            if task.deadline:
+                dias = (task.deadline - datetime.now()).days
+                if dias < 0:
+                    puntaje *= 2.5
+                    logger.debug(f"🚨 Deadline vencido: {task.title}")
+                elif dias == 0:
+                    puntaje *= 2.0
+                    logger.debug(f"⏳ Deadline hoy: {task.title}")
+                elif dias <= 1:
+                    puntaje *= 1.7
+                    logger.debug(f"📅 Deadline mañana: {task.title}")
+                elif dias <= 3:
+                    puntaje *= 1.3
+                    logger.debug(f"📅 Deadline en 3 días: {task.title}")
+
+            resultados.append({
+                'task_obj': task,
+                'puntaje_ml': float(puntaje),
+                'titulo': task.title
+            })
+            logger.debug(f"🔖 Tarea '{task.title[:20]}' asignado puntaje por reglas: {puntaje:.2f}")
+
+        return self._post_procesamiento(resultados)
+
+    def predecir_prioridad_tareas(self, tasks: List[Task]) -> List[Dict[str, Any]]:
+        """Predice prioridad usando ML si hay suficientes datos, si no usa reglas"""
+        if not tasks:
+            return []
+
+        # Verificar si hay suficientes datos para ML
+        completed_count = self.db.query(Task).filter(
+            Task.user_id == self.user_id,
+            Task.status == 'completed'
+        ).count()
+        logger.info(f"✅ Tareas completadas disponibles: {completed_count}")
+
+        # Si no hay suficientes datos o modelo no cargado, usar reglas
+        if self.modelo is None or completed_count < 3:
+            logger.warning(f"🧠 Usando sistema de reglas (modelo no disponible o solo {completed_count}/3 tareas completadas)")
+            return self._prioridad_por_reglas(tasks)
+
+        try:
+            logger.info("🤖 Usando modelo ML para predicción")
+            datos_pred = []
+            
+            for task in tasks:
+                # Calcular si tiene deadline próximo
+                deadline_proximo = 0
+                if task.deadline:
+                    dias = (task.deadline - datetime.now()).days
+                    deadline_proximo = 1 if dias <= 1 else 0
+                
+                d = {
+                    'task_obj': task,
+                    'urgencia_encoded': URGENCIA_MAP.get(_normalizar_nivel(task.urgency), 1),
+                    'impacto_encoded': IMPACTO_MAP.get(_normalizar_nivel(task.impact), 1),
+                    'energia_encoded': ENERGIA_MAP.get(_normalizar_nivel(task.energy_required), 1),
+                    'duracion_estimada': float(task.estimated_duration or 60),
+                    'longitud_descripcion': len(task.description or ""),
+                    'tiene_urgente': 1 if "urgent" in (task.description or "").lower() or "crític" in (task.title or "").lower() else 0,
+                    'tiene_bug': 1 if "bug" in (task.title or "").lower() or "fix" in (task.title or "").lower() else 0,
+                    'deadline_proximo': deadline_proximo
+                }
+                datos_pred.append(d)
+
+            # Preparar datos para predicción
+            X_pred = []
+            for d in datos_pred:
+                x = [
+                    d['urgencia_encoded'],
+                    d['impacto_encoded'],
+                    d['energia_encoded'],
+                    d['duracion_estimada'],
+                    d['longitud_descripcion'],
+                    d['tiene_urgente'],
+                    d['tiene_bug'],
+                    d['deadline_proximo']
+                ]
+                X_pred.append(x)
+
+            X_pred = np.array(X_pred)
+            logger.info(f"📊 Datos para predicción (shape: {X_pred.shape}):\n{X_pred}")
+
+            # Realizar predicciones
+            predicciones = self.modelo.predict(X_pred)
+            logger.info(f"🎯 Predicciones del modelo (niveles de prioridad): {predicciones}")
+
+            # Convertir a puntajes (1, 2, 3)
+            resultados = []
+            for i, d in enumerate(datos_pred):
+                puntaje = float(predicciones[i])  # Ya es 1, 2 o 3
+                resultados.append({
+                    'task_obj': d['task_obj'],
+                    'puntaje_ml': puntaje,
+                    'titulo': d['task_obj'].title
+                })
+                logger.info(f"📈 Tarea '{d['task_obj'].title[:20]}': prioridad ML = {puntaje:.0f}")
+
+            # Aplicar post-procesamiento
+            resultados = self._post_procesamiento(resultados)
+            
+            # Ordenar por puntaje
+            resultados_ordenados = sorted(resultados, key=lambda x: x['puntaje_ml'], reverse=True)
+            logger.info("✅ Predicción con ML completada exitosamente")
+            return resultados_ordenados
 
         except Exception as e:
+            logger.error(f"❌ Error crítico en predicción ML: {e}")
+            logger.error(traceback.format_exc())
+            logger.warning("🔄 Fallback a sistema de reglas tras error en ML")
+            return self._prioridad_por_reglas(tasks)
+
+    def recomendar_horario(self, task: Task) -> str:
+        """Recomienda hora basado en energía y tipo de tarea"""
+        try:
+            energia = task.energy_required or "medium"
+            titulo = (task.title or "").lower()
+            
+            if energia == "high" or any(w in titulo for w in ['bug', 'fix', 'critical', 'error', 'caído', 'seguridad']):
+                return "08:00"
+            elif 10 <= datetime.now().hour < 15 and energia == "medium":
+                return "12:00"
+            elif energia == "medium":
+                return "14:00"
+            else:
+                return "16:00"
+        except Exception as e:
             logger.error(f"❌ Error en recomendar_horario: {e}")
+            logger.error(traceback.format_exc())
             return "10:00"
