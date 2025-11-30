@@ -9,6 +9,7 @@ from app.database import get_db
 from app.models.database_models import Task, User, Category, TaskHistory
 from app.models.pydantic_models import TaskCreate, TaskResponse
 from app.security.auth import get_current_active_user
+from app.services.task_service import TaskService
 
 router = APIRouter()
 
@@ -61,41 +62,14 @@ def create_task(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user) 
 ):
-    """Crear una nueva tarea para el usuario actual"""
+    """Crear una nueva tarea para el usuario actual con cálculo automático de prioridad"""
     
-    task_data = task.dict()
-    task_data['user_id'] = current_user.id 
-    
-    if task.category_id:
-        category = db.query(Category).filter(
-            Category.id == task.category_id,
-            Category.user_id == current_user.id
-        ).first()
-        if not category:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Category not found or doesn't belong to user"
-            )
-    
-    db_task = Task(**task_data)
-    db.add(db_task)
-    db.commit()
-    db.refresh(db_task)
-    
-    # Registrar en el historial
-    history_entry = TaskHistory(
-        task_id=db_task.id,
+    db_task = TaskService.create_task_with_priority(
+        db=db,
+        task_create=task,
         user_id=current_user.id,
-        change_type='created',
-        new_values={
-            'title': db_task.title,
-            'status': db_task.status,
-            'description': db_task.description
-        },
-        change_description='Task created'
+        category_id=task.category_id
     )
-    db.add(history_entry)
-    db.commit()
     
     return db_task
 
@@ -138,6 +112,8 @@ def update_task(
         )
         db.add(history_entry)
         db.commit()
+    
+    TaskService.recalculate_task_priority(db, task_id, current_user.id)
     
     return db_task
 
