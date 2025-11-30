@@ -1,3 +1,4 @@
+from uuid import UUID
 from sqlalchemy.orm import Session
 from app.models.database_models import Task, TaskHistory
 from app.models.pydantic_models import TaskCreate
